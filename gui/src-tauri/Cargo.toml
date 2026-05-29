@@ -1,0 +1,29 @@
+[package]
+name = "reapershield-gui"
+version = "0.1.0"
+edition = "2021"
+authors = ["ReaperShield Team"]
+description = "Tauri backend for the ReaperShield security suite"
+
+[build-dependencies]
+tauri-build = { version = "1.5", features = [] }
+
+[dependencies]
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+tauri = { version = "1.5", features = ["api-all"] }
+uuid = { workspace = true }
+chrono = { workspace = true }
+reapershield-sdk = { path = "../../sdk" }
+reapershield-analyzer = { path = "../../crates/analyzer" }
+reapershield-crypto = { path = "../../crates/crypto" }
+reapershield-packer = { path = "../../crates/packer" }
+reapershield-obfuscation = { path = "../../crates/obfuscation" }
+reapershield-hardening = { path = "../../crates/hardening" }
+reapershield-telemetry = { path = "../../crates/telemetry" }
+reapershield-reports = { path = "../../crates/reports" }
+reapershield-visualization = { path = "../../crates/visualization" }
+reapershield-evasion = { path = "../../crates/evasion" }
+
+[features]
+custom-protocol = ["tauri/custom-protocol"]

@@ -1,0 +1,13 @@
+[package]
+name = "reapershield-obfuscation"
+version = "0.1.0"
+edition = "2021"
+authors = ["ReaperShield Team"]
+description = "Binary and string obfuscation, symbol scrambling, and diversification engine for ReaperShield"
+
+[dependencies]
+serde = { workspace = true, features = ["derive"] }
+thiserror = { workspace = true }
+rand = { workspace = true }
+goblin = { workspace = true }
+reapershield-pe-engine = { path = "../pe-engine" }

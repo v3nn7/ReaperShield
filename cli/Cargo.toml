@@ -1,0 +1,30 @@
+[package]
+name = "reapershield-cli"
+version = "0.1.0"
+edition = "2021"
+authors = ["ReaperShield Team"]
+description = "Command line interface utility for ReaperShield binary protection and analysis suite"
+
+[[bin]]
+name = "reapershield"
+path = "src/main.rs"
+
+[dependencies]
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+clap = { workspace = true, features = ["derive"] }
+env_logger = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+reapershield-pe-engine = { path = "../crates/pe-engine" }
+reapershield-sdk = { path = "../sdk" }
+reapershield-analyzer = { path = "../crates/analyzer" }
+reapershield-crypto = { path = "../crates/crypto" }
+reapershield-packer = { path = "../crates/packer" }
+reapershield-obfuscation = { path = "../crates/obfuscation" }
+reapershield-hardening = { path = "../crates/hardening" }
+reapershield-telemetry = { path = "../crates/telemetry" }
+reapershield-reports = { path = "../crates/reports" }
+reapershield-evasion = { path = "../crates/evasion" }

@@ -1,0 +1,14 @@
+[package]
+name = "reapershield-reports"
+version = "0.1.0"
+edition = "2021"
+authors = ["ReaperShield Team"]
+description = "Enterprise audit report generation in JSON and HTML format for ReaperShield"
+
+[dependencies]
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+chrono = { workspace = true }
+reapershield-analyzer = { path = "../analyzer" }
+reapershield-telemetry = { path = "../telemetry" }

@@ -1,0 +1,14 @@
+[package]
+name = "reapershield-hardening"
+version = "0.1.0"
+edition = "2021"
+authors = ["ReaperShield Team"]
+description = "PE Hardening, anti-tamper validations, and runtime integrity checks for ReaperShield"
+
+[dependencies]
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+sha2 = { workspace = true }
+goblin = { workspace = true }
+reapershield-pe-engine = { path = "../pe-engine" }

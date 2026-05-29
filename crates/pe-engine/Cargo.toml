@@ -1,0 +1,13 @@
+[package]
+name = "reapershield-pe-engine"
+version = "0.1.0"
+edition = "2021"
+authors = ["ReaperShield Team"]
+description = "PE binary rewriting and resource editing engine for ReaperShield"
+
+[dependencies]
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+goblin = { workspace = true }
+anyhow = { workspace = true }

@@ -1,0 +1,11 @@
+[package]
+name = "reapershield-visualization"
+version = "0.1.0"
+edition = "2021"
+authors = ["ReaperShield Team"]
+description = "Binary structures visualization engine for ReaperShield"
+
+[dependencies]
+serde = { workspace = true, features = ["derive"] }
+thiserror = { workspace = true }
+reapershield-analyzer = { path = "../analyzer" }

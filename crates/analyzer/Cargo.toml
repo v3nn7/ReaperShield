@@ -1,0 +1,17 @@
+[package]
+name = "reapershield-analyzer"
+version = "0.1.0"
+edition = "2021"
+authors = ["ReaperShield Team"]
+description = "PE binary analysis engine for the ReaperShield platform"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+goblin = { workspace = true }
+sha2 = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+md5 = "0.7"
+sha1 = "0.10"

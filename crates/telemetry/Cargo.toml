@@ -1,0 +1,14 @@
+[package]
+name = "reapershield-telemetry"
+version = "0.1.0"
+edition = "2021"
+authors = ["ReaperShield Team"]
+description = "Runtime telemetry, logging, and crash event reporting for ReaperShield"
+
+[dependencies]
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+log = { workspace = true }

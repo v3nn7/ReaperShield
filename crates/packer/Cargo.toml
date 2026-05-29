@@ -1,0 +1,15 @@
+[package]
+name = "reapershield-packer"
+version = "0.1.0"
+edition = "2021"
+authors = ["ReaperShield Team"]
+description = "High-compression secure binary packer and self-extracting loader generator"
+
+[dependencies]
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+lzma-rs = { workspace = true }
+zstd = { workspace = true }
+reapershield-crypto = { path = "../crypto" }
+reapershield-pe-engine = { path = "../pe-engine" }

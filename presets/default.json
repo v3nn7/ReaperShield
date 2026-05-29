@@ -1,0 +1,23 @@
+{
+  "obfuscation": {
+    "encrypt_strings": true,
+    "xor_key": 92,
+    "rename_sections": true,
+    "section_prefix": ".reap",
+    "generate_junk_instructions": true,
+    "junk_size": 512,
+    "diversify_layout": true
+  },
+  "hardening": {
+    "force_dep": true,
+    "force_aslr": true,
+    "force_high_entropy_aslr": true,
+    "force_cfg": true,
+    "force_integrity_check": true,
+    "inject_anti_tamper": true
+  },
+  "compression": "zstd",
+  "encrypt_assets": true,
+  "encryption_algorithm": "Aes256Gcm",
+  "generate_reports": true
+}

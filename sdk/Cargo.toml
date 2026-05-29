@@ -1,0 +1,24 @@
+[package]
+name = "reapershield-sdk"
+version = "0.1.0"
+edition = "2021"
+authors = ["ReaperShield Team"]
+description = "High-level executable protection workflow SDK for ReaperShield"
+
+[dependencies]
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+reapershield-crypto = { path = "../crates/crypto" }
+reapershield-analyzer = { path = "../crates/analyzer" }
+reapershield-pe-engine = { path = "../crates/pe-engine" }
+reapershield-packer = { path = "../crates/packer" }
+reapershield-obfuscation = { path = "../crates/obfuscation" }
+reapershield-hardening = { path = "../crates/hardening" }
+reapershield-telemetry = { path = "../crates/telemetry" }
+reapershield-reports = { path = "../crates/reports" }
+reapershield-visualization = { path = "../crates/visualization" }
+reapershield-evasion = { path = "../crates/evasion" }
