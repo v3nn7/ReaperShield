@@ -36,6 +36,7 @@ pub struct HardeningIntegrityManifest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct HardeningConfig {
     pub force_dep: bool,
     pub force_aslr: bool,
@@ -43,6 +44,19 @@ pub struct HardeningConfig {
     pub force_cfg: bool,
     pub force_integrity_check: bool,
     pub inject_anti_tamper: bool,
+}
+
+impl Default for HardeningConfig {
+    fn default() -> Self {
+        Self {
+            force_dep: true,
+            force_aslr: true,
+            force_high_entropy_aslr: true,
+            force_cfg: true,
+            force_integrity_check: true,
+            inject_anti_tamper: true,
+        }
+    }
 }
 
 pub struct HardeningSystem;

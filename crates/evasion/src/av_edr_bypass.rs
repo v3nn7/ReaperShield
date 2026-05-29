@@ -75,12 +75,53 @@ impl AvEdrBypass {
     /// Find function address by hash in a given module base
     #[cfg(target_os = "windows")]
     pub fn get_proc_address_by_hash(module_base: usize, func_hash: u32) -> Option<usize> {
-        use windows::Win32::System::Diagnostics::Debug::{IMAGE_DOS_HEADER, IMAGE_NT_HEADERS64, IMAGE_EXPORT_DIRECTORY};
+        #[repr(C)]
+        #[allow(non_snake_case)]
+        struct IMAGE_DOS_HEADER {
+            e_magic: u16,
+            e_cblp: u16,
+            e_cp: u16,
+            e_crlc: u16,
+            e_cparhdr: u16,
+            e_minalloc: u16,
+            e_maxalloc: u16,
+            e_ss: u16,
+            e_sp: u16,
+            e_csum: u16,
+            e_ip: u16,
+            e_cs: u16,
+            e_lfarlc: u16,
+            e_ovno: u16,
+            e_res: [u16; 4],
+            e_oemid: u16,
+            e_oeminfo: u16,
+            e_res2: [u16; 10],
+            e_lfanew: i32,
+        }
+
+        #[repr(C)]
+        #[allow(non_snake_case)]
+        struct IMAGE_EXPORT_DIRECTORY {
+            Characteristics: u32,
+            TimeDateStamp: u32,
+            MajorVersion: u16,
+            MinorVersion: u16,
+            Name: u32,
+            Base: u32,
+            NumberOfFunctions: u32,
+            NumberOfNames: u32,
+            AddressOfFunctions: u32,
+            AddressOfNames: u32,
+            AddressOfNameOrdinals: u32,
+        }
 
         unsafe {
             let dos_header = &*(module_base as *const IMAGE_DOS_HEADER);
-            let nt_header = &*((module_base + dos_header.e_lfanew as usize) as *const IMAGE_NT_HEADERS64);
-            let export_dir_rva = nt_header.OptionalHeader.DataDirectory[0].VirtualAddress as usize;
+            let nt_header_ptr = (module_base + dos_header.e_lfanew as usize) as *const u8;
+            // Skip signature (4 bytes) + COFF header (20 bytes) = offset 24 to Optional Header
+            // DataDirectory[0] (Export) is at offset 112 in Optional Header for PE32+ (96 + 16)
+            let optional_header_ptr = nt_header_ptr.add(24);
+            let export_dir_rva = *(optional_header_ptr.add(112) as *const u32) as usize;
             
             if export_dir_rva == 0 { return None; }
 

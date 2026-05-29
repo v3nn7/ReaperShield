@@ -1,8 +1,17 @@
 use goblin::pe::PE;
-use rand::{distributions::Alphanumeric, Rng, RngCore};
-use std::collections::HashMap;
+use rand::{distributions::Alphanumeric, Rng};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+
+mod control_flow;
+mod import_obfuscation;
+mod anti_debug;
+mod string_encryption;
+
+pub use control_flow::*;
+pub use import_obfuscation::*;
+pub use anti_debug::*;
+pub use string_encryption::*;
 
 #[derive(Debug, Error)]
 pub enum ObfuscationError {
@@ -17,9 +26,22 @@ pub enum ObfuscationError {
 
     #[error("Obfuscation execution failed: {0}")]
     ObfuscationFailed(String),
+
+    #[error("Control flow obfuscation failed: {0}")]
+    ControlFlowError(String),
+
+    #[error("Import obfuscation failed: {0}")]
+    ImportObfuscationError(String),
+
+    #[error("Anti-debug injection failed: {0}")]
+    AntiDebugError(String),
+
+    #[error("String encryption failed: {0}")]
+    StringEncryptionError(String),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct ObfuscationConfig {
     pub encrypt_strings: bool,
     pub xor_key: u8,
@@ -28,6 +50,34 @@ pub struct ObfuscationConfig {
     pub generate_junk_instructions: bool,
     pub junk_size: usize,
     pub diversify_layout: bool,
+    pub control_flow_obfuscation: bool,
+    pub opaque_predicates: bool,
+    pub bogus_jumps: bool,
+    pub import_obfuscation: bool,
+    pub anti_debug_injection: bool,
+    pub string_encryption: bool,
+    pub encrypt_resource_sections: bool,
+}
+
+impl Default for ObfuscationConfig {
+    fn default() -> Self {
+        Self {
+            encrypt_strings: true,
+            xor_key: 0x5C,
+            rename_sections: true,
+            section_prefix: ".reap".to_string(),
+            generate_junk_instructions: true,
+            junk_size: 1024,
+            diversify_layout: true,
+            control_flow_obfuscation: true,
+            opaque_predicates: true,
+            bogus_jumps: true,
+            import_obfuscation: true,
+            anti_debug_injection: true,
+            string_encryption: true,
+            encrypt_resource_sections: false,
+        }
+    }
 }
 
 pub struct ObfuscationEngine;
@@ -43,56 +93,175 @@ impl ObfuscationEngine {
     pub fn generate_junk_instructions(size: usize) -> Vec<u8> {
         let mut rng = rand::thread_rng();
         let mut junk = Vec::with_capacity(size);
-        
+
         while junk.len() < size {
-            // Randomly decide the "density" for this chunk to create variable entropy
-            let entropy_mode = rng.gen_range(0..10);
-            
+            let remaining = size - junk.len();
+            let entropy_mode = rng.gen_range(0..20);
+
             match entropy_mode {
                 0..=3 => {
-                    // VERY LOW ENTROPY: NOPs and alignment (very common in real compilers)
-                    let count = rng.gen_range(1..8).min(size - junk.len());
+                    // VERY LOW ENTROPY: NOPs and alignment
+                    let count = rng.gen_range(1..8).min(remaining);
                     junk.extend(std::iter::repeat(0x90).take(count));
                 }
                 4..=7 => {
                     // NATURAL ENTROPY: Common instruction patterns
-                    let sub_mode = rng.gen_range(0..5);
+                    let sub_mode = rng.gen_range(0..8);
                     match sub_mode {
-                        0 => { // push/pop pairs
-                            if junk.len() + 2 <= size {
+                        0 => {
+                            // push/pop pairs
+                            if remaining >= 2 {
                                 let reg = rng.gen_range(0x50..0x58);
                                 junk.push(reg);
                                 junk.push(reg + 0x08);
                             }
                         }
-                        1 => { // test reg, reg (very common)
-                            if junk.len() + 2 <= size {
+                        1 => {
+                            // test reg, reg (very common)
+                            if remaining >= 2 {
                                 let reg = rng.gen_range(0xC0..0xFF);
                                 junk.extend_from_slice(&[0x85, reg]);
                             }
                         }
-                        2 => { // lea rax, [rax+0]
-                            if junk.len() + 4 <= size {
+                        2 => {
+                            // lea rax, [rax+0]
+                            if remaining >= 4 {
                                 junk.extend_from_slice(&[0x48, 0x8D, 0x40, 0x00]);
                             }
                         }
-                        3 => { // mov rbp, rbp
-                            if junk.len() + 3 <= size {
+                        3 => {
+                            // mov rbp, rbp
+                            if remaining >= 3 {
                                 junk.extend_from_slice(&[0x48, 0x89, 0xED]);
                             }
                         }
-                        _ => junk.push(0x90),
+                        4 => {
+                            // xor eax, eax (common zeroing idiom)
+                            if remaining >= 2 {
+                                junk.extend_from_slice(&[0x31, 0xC0]);
+                            }
+                        }
+                        5 => {
+                            // mov eax, eax (no-op move)
+                            if remaining >= 2 {
+                                junk.extend_from_slice(&[0x89, 0xC0]);
+                            }
+                        }
+                        6 => {
+                            // xchg eax, eax (long NOP)
+                            if remaining >= 1 {
+                                junk.push(0x87);
+                                junk.push(0xC0);
+                            }
+                        }
+                        _ => {
+                            // lea esi, [esi+0] (6-byte NOP)
+                            if remaining >= 6 {
+                                junk.extend_from_slice(&[0x8D, 0xB6, 0x00, 0x00, 0x00, 0x00]);
+                            }
+                        }
                     }
                 }
-                8..=9 => {
+                8..=11 => {
                     // MEDIUM ENTROPY: Small math operations
-                    if junk.len() + 3 <= size {
-                        let op = [0x81, 0x83][rng.gen_range(0..2)];
-                        let reg = rng.gen_range(0xC0..0xC8);
-                        junk.extend_from_slice(&[op, reg, 0x00]);
+                    let sub_mode = rng.gen_range(0..6);
+                    match sub_mode {
+                        0 => {
+                            // add reg, 0
+                            if remaining >= 3 {
+                                let op = [0x81, 0x83][rng.gen_range(0..2)];
+                                let reg = rng.gen_range(0xC0..0xC8);
+                                junk.extend_from_slice(&[op, reg, 0x00]);
+                            }
+                        }
+                        1 => {
+                            // adc reg, 0
+                            if remaining >= 3 {
+                                let reg = rng.gen_range(0xD0..0xD8);
+                                junk.extend_from_slice(&[0x15, reg, 0x00]);
+                            }
+                        }
+                        2 => {
+                            // sub reg, 0
+                            if remaining >= 3 {
+                                let reg = rng.gen_range(0xE8..0xF0);
+                                junk.extend_from_slice(&[0x83, reg, 0x00]);
+                            }
+                        }
+                        3 => {
+                            // inc reg (32-bit)
+                            if remaining >= 2 {
+                                let reg = rng.gen_range(0x40..0x48);
+                                junk.push(reg);
+                            }
+                        }
+                        4 => {
+                            // dec reg (32-bit)
+                            if remaining >= 2 {
+                                let reg = rng.gen_range(0x48..0x50);
+                                junk.push(reg);
+                            }
+                        }
+                        _ => {
+                            // nop dword [rax+0] (multi-byte NOP)
+                            if remaining >= 4 {
+                                junk.extend_from_slice(&[0x0F, 0x1F, 0x40, 0x00]);
+                            }
+                        }
                     }
+                }
+                12..=15 => {
+                    // HIGH ENTROPY: Complex multi-byte patterns
+                    let sub_mode = rng.gen_range(0..5);
+                    match sub_mode {
+                        0 => {
+                            // mov rax, [rax] (read from self - safe if rax points to valid memory)
+                            if remaining >= 3 {
+                                junk.extend_from_slice(&[0x48, 0x8B, 0x00]);
+                            }
+                        }
+                        1 => {
+                            // test rax, rax
+                            if remaining >= 3 {
+                                junk.extend_from_slice(&[0x48, 0x85, 0xC0]);
+                            }
+                        }
+                        2 => {
+                            // cmp rax, 0
+                            if remaining >= 4 {
+                                junk.extend_from_slice(&[0x48, 0x83, 0xF8, 0x00]);
+                            }
+                        }
+                        3 => {
+                            // pushfq / popfq (flag register manipulation)
+                            if remaining >= 2 {
+                                junk.push(0x9C); // pushfq
+                                junk.push(0x9D); // popfq
+                            }
+                        }
+                        _ => {
+                            // lea rsp, [rsp+0] (stack pointer nop)
+                            if remaining >= 4 {
+                                junk.extend_from_slice(&[0x48, 0x8D, 0x64, 0x24, 0x00]);
+                            }
+                        }
+                    }
+                }
+                16..=17 => {
+                    // VERY HIGH ENTROPY: Rare but valid instruction sequences
+                    if remaining >= 5 {
+                        // cdqe (cwd followed by something)
+                        junk.extend_from_slice(&[0x48, 0x98]); // cdqe
+                        if remaining >= 7 {
+                            // cbw
+                            junk.extend_from_slice(&[0x66, 0x98]);
+                        }
+                    }
+                }
                 _ => {
-                    junk.push(0x90);
+                    // Default: NOP sled
+                    let count = rng.gen_range(1..4).min(remaining);
+                    junk.extend(std::iter::repeat(0x90).take(count));
                 }
             }
         }
@@ -108,7 +277,6 @@ impl ObfuscationEngine {
         let pe = PE::parse(pe_buffer).map_err(|e| ObfuscationError::PeParseError(e.to_string()))?;
         let mut out_buffer = pe_buffer.to_vec();
 
-        // PE structures
         let e_lfanew = u32::from_le_bytes(pe_buffer[0x3C..0x40].try_into().unwrap()) as usize;
         let coff_offset = e_lfanew + 4;
         let size_of_opt_header = pe.header.coff_header.size_of_optional_header as usize;
@@ -118,23 +286,19 @@ impl ObfuscationEngine {
         let num_sections = pe.header.coff_header.number_of_sections as usize;
 
         for i in 0..num_sections {
-            // Find current section offset in section headers table
             let offset = section_table_offset + (i * 40);
-            
-            // Generate unique randomized name
+
             let rand_suffix: String = (&mut rng)
                 .sample_iter(&Alphanumeric)
                 .take(4)
                 .map(char::from)
                 .collect();
             let new_name = format!("{}{}", section_prefix, rand_suffix);
-            
-            // Format to 8-byte array
+
             let mut name_bytes = [0u8; 8];
             let limit = new_name.as_bytes().len().min(8);
             name_bytes[..limit].copy_from_slice(&new_name.as_bytes()[..limit]);
 
-            // Replace section name in output buffer (Section Name is first 8 bytes of section header)
             out_buffer[offset..offset + 8].copy_from_slice(&name_bytes);
         }
 
@@ -142,25 +306,22 @@ impl ObfuscationEngine {
     }
 
     /// Diversifies binary layout by injecting an obfuscated junk section.
-    /// Focused on mimicking real data sections (mix of strings, pointers, and padding).
     pub fn diversify_layout(
         pe_buffer: &[u8],
         junk_size: usize,
     ) -> Result<Vec<u8>, ObfuscationError> {
         let mut rng = rand::thread_rng();
         let mut junk_payload = Vec::with_capacity(junk_size);
-        
+
         while junk_payload.len() < junk_size {
             let chunk_type = rng.gen_range(0..10);
             let chunk_size = rng.gen_range(16..128).min(junk_size - junk_payload.len());
-            
+
             match chunk_type {
                 0..=4 => {
-                    // Low entropy: Zero padding / Nulls (extremely common in .data/.rdata)
                     junk_payload.extend(std::iter::repeat(0x00).take(chunk_size));
                 }
                 5..=7 => {
-                    // Medium entropy: Fake ASCII strings / metadata
                     let s: String = (&mut rng)
                         .sample_iter(&Alphanumeric)
                         .take(chunk_size)
@@ -169,7 +330,6 @@ impl ObfuscationEngine {
                     junk_payload.extend_from_slice(s.as_bytes());
                 }
                 8..=9 => {
-                    // Realistic "Code/Data" mix
                     let instr = Self::generate_junk_instructions(chunk_size);
                     junk_payload.extend_from_slice(&instr);
                 }
@@ -177,15 +337,71 @@ impl ObfuscationEngine {
             }
         }
 
-        // Inject the randomized junk as an initialized read-only data section `.reajunk`
         let modified = reapershield_pe_engine::PeEngine::inject_section(
             pe_buffer,
             ".reajunk",
             &junk_payload,
-            0x4000_0040, // READ initialized data
-        ).map_err(|e| ObfuscationError::ObfuscationFailed(e.to_string()))?;
+            0x4000_0040,
+        )
+        .map_err(|e| ObfuscationError::ObfuscationFailed(e.to_string()))?;
 
         Ok(modified)
+    }
+
+    /// Generates multiple junk code sections with different entropy profiles
+    pub fn generate_multi_section_junk(
+        pe_buffer: &[u8],
+        total_size: usize,
+    ) -> Result<Vec<u8>, ObfuscationError> {
+        let mut buffer = pe_buffer.to_vec();
+        let sections_count = 3.min(total_size / 256);
+        let per_section = total_size / sections_count;
+
+        for i in 0..sections_count {
+            let section_name = format!(".rjunk{}", i);
+            let junk = Self::generate_junk_instructions(per_section);
+            let characteristics = match i % 3 {
+                0 => 0x6000_0020, // EXECUTE | READ
+                1 => 0x4000_0040, // READ | INITIALIZED_DATA
+                _ => 0xC000_0040, // READ | WRITE | INITIALIZED_DATA
+            };
+            buffer = reapershield_pe_engine::PeEngine::inject_section(
+                &buffer,
+                &section_name,
+                &junk,
+                characteristics,
+            )
+            .map_err(|e| ObfuscationError::ObfuscationFailed(e.to_string()))?;
+        }
+
+        Ok(buffer)
+    }
+
+    /// Injects fake PE section headers to confuse analysis tools
+    pub fn inject_fake_sections(
+        pe_buffer: &[u8],
+        count: usize,
+    ) -> Result<Vec<u8>, ObfuscationError> {
+        let mut buffer = pe_buffer.to_vec();
+        let fake_names = [
+            ".debug", ".pdata", ".xdata", ".bss", ".tls",
+            ".reloc", ".idata", ".edata", ".rsrc", ".crt",
+        ];
+
+        for i in 0..count {
+            let name = fake_names[i % fake_names.len()];
+            let suffix = format!("{}{:02X}", name, i);
+            let fake_data = Self::generate_junk_instructions(64);
+            buffer = reapershield_pe_engine::PeEngine::inject_section(
+                &buffer,
+                &suffix,
+                &fake_data,
+                0x4000_0000, // READ only
+            )
+            .map_err(|e| ObfuscationError::ObfuscationFailed(e.to_string()))?;
+        }
+
+        Ok(buffer)
     }
 
     /// Runs all configured obfuscation strategies on the binary
@@ -195,23 +411,77 @@ impl ObfuscationEngine {
     ) -> Result<Vec<u8>, ObfuscationError> {
         let mut buffer = pe_buffer.to_vec();
 
+        // Phase 1: Section renaming
         if config.rename_sections {
             buffer = Self::rename_pe_sections(&buffer, &config.section_prefix)?;
         }
 
+        // Phase 2: XOR string obfuscation (XOR encrypt data sections)
+        if config.encrypt_strings {
+            buffer = Self::apply_xor_encryption(&buffer, config.xor_key)?;
+        }
+
+        // Phase 3: Single combined junk + layout section
         if config.generate_junk_instructions && config.junk_size > 0 {
             let junk = Self::generate_junk_instructions(config.junk_size);
-            // Append junk instructions as an executable section `.reajunk`
             buffer = reapershield_pe_engine::PeEngine::inject_section(
                 &buffer,
                 ".reacode",
                 &junk,
-                0x6000_0020, // EXECUTE | READ code section
-            ).map_err(|e| ObfuscationError::ObfuscationFailed(e.to_string()))?;
+                0x6000_0020,
+            )
+            .map_err(|e| ObfuscationError::ObfuscationFailed(e.to_string()))?;
         }
 
+        // Phase 4: Single layout diversification section
         if config.diversify_layout {
-            buffer = Self::diversify_layout(&buffer, 1024)?;
+            buffer = Self::diversify_layout(&buffer, 2048)?;
+        }
+
+        // Phase 5: Control flow obfuscation (modifies in-place, no new sections)
+        if config.control_flow_obfuscation {
+            buffer = ControlFlowObfuscator::apply_control_flow_obfuscation(
+                &buffer,
+                config.opaque_predicates,
+                config.bogus_jumps,
+            )?;
+        }
+
+        // Phase 6: Import table obfuscation (1 section)
+        if config.import_obfuscation {
+            buffer = ImportObfuscator::obfuscate_imports(&buffer)?;
+        }
+
+        // Phase 7: Anti-debug stub (1 combined section)
+        if config.anti_debug_injection {
+            buffer = AntiDebugInjector::inject_anti_debug(&buffer)?;
+        }
+
+        // Phase 8: String encryption (no new sections - encrypts in place)
+        if config.string_encryption {
+            buffer = StringEncryptor::encrypt_code_strings(&buffer, config.xor_key)?;
+        }
+
+        Ok(buffer)
+    }
+
+    /// Apply XOR encryption to data sections in the PE
+    fn apply_xor_encryption(pe_buffer: &[u8], key: u8) -> Result<Vec<u8>, ObfuscationError> {
+        let pe = PE::parse(pe_buffer).map_err(|e| ObfuscationError::PeParseError(e.to_string()))?;
+        let mut buffer = pe_buffer.to_vec();
+
+        for section in pe.sections {
+            let name = String::from_utf8_lossy(&section.name).to_string();
+            // Encrypt data sections but not code sections
+            if name.contains("data") || name.contains("rdata") || name.contains("idata") {
+                let start = section.pointer_to_raw_data as usize;
+                let end = start + section.size_of_raw_data as usize;
+                if end <= buffer.len() && start < end {
+                    let section_data = &buffer[start..end];
+                    let encrypted = Self::xor_obfuscate(section_data, key);
+                    buffer[start..end].copy_from_slice(&encrypted);
+                }
+            }
         }
 
         Ok(buffer)
@@ -238,7 +508,24 @@ mod tests {
         let size = 120;
         let junk = ObfuscationEngine::generate_junk_instructions(size);
         assert_eq!(junk.len(), size);
-        // Ensure NOP is included
         assert!(junk.contains(&0x90));
+    }
+
+    #[test]
+    fn test_junk_generation_exact_size() {
+        for size in [1, 10, 50, 100, 512, 1024] {
+            let junk = ObfuscationEngine::generate_junk_instructions(size);
+            assert!(junk.len() >= size, "Junk too small for {}: {}", size, junk.len());
+        }
+    }
+
+    #[test]
+    fn test_xor_roundtrip() {
+        let data = vec![0u8, 1, 2, 127, 128, 255, 0x5C, 0xAA];
+        for key in [0x00, 0x01, 0x55, 0xAA, 0xFF] {
+            let encrypted = ObfuscationEngine::xor_obfuscate(&data, key);
+            let decrypted = ObfuscationEngine::xor_obfuscate(&encrypted, key);
+            assert_eq!(data, decrypted);
+        }
     }
 }

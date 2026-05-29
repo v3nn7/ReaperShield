@@ -100,12 +100,48 @@ impl PeEngine {
             }
         }
 
-        if (end_of_section_table + 40) > first_section_raw_ptr as usize {
-            return Err(PeEngineError::NoHeaderSpace);
-        }
-
-        // Copy input buffer to mutable vector
         let mut out_buffer = pe_buffer.to_vec();
+
+        // If not enough space, shift all sections forward to make room
+        if (end_of_section_table + 40) > first_section_raw_ptr as usize {
+            let needed = (end_of_section_table + 40) - first_section_raw_ptr as usize;
+            let shift = Self::align_up(needed as u32, file_alignment) as usize;
+
+            // Shift raw data of all sections forward by `shift` bytes
+            let old_len = out_buffer.len();
+            out_buffer.resize(old_len + shift, 0);
+
+            // Move sections in reverse order to avoid overwriting
+            for sec in pe.sections.iter().rev() {
+                let src_start = sec.pointer_to_raw_data as usize;
+                let src_size = sec.size_of_raw_data as usize;
+                if src_start + src_size <= old_len && src_start > 0 {
+                    let dst_start = src_start + shift;
+                    // Copy section data
+                    for i in 0..src_size {
+                        if src_start + i < old_len && dst_start + i < out_buffer.len() {
+                            out_buffer[dst_start + i] = out_buffer[src_start + i];
+                        }
+                    }
+                    // Zero out old location
+                    for i in 0..src_size {
+                        if src_start + i < old_len {
+                            out_buffer[src_start + i] = 0;
+                        }
+                    }
+                    // Update section header's pointer_to_raw_data
+                    let sec_offset = section_table_offset + (pe.sections.iter().position(|s| std::ptr::eq(s, sec)).unwrap_or(0) * 40);
+                    let new_ptr = (src_start as u32) + shift as u32;
+                    out_buffer[sec_offset + 20..sec_offset + 24].copy_from_slice(&new_ptr.to_le_bytes());
+                }
+            }
+
+            // Update SizeOfImage
+            let size_of_image_offset = coff_offset + 20 + 56;
+            let old_size_of_image = u32::from_le_bytes(out_buffer[size_of_image_offset..size_of_image_offset + 4].try_into().unwrap());
+            let new_size_of_image = Self::align_up(old_size_of_image + shift as u32, section_alignment);
+            out_buffer[size_of_image_offset..size_of_image_offset + 4].copy_from_slice(&new_size_of_image.to_le_bytes());
+        }
 
         // Calculate virtual address and raw data pointer for new section
         let last_sec_virtual_addr = if num_sections > 0 {

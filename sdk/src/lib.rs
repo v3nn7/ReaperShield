@@ -47,6 +47,7 @@ pub enum SdkError {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct ProtectionPipelineConfig {
     pub obfuscation: ObfuscationConfig,
     pub hardening: HardeningConfig,
@@ -54,6 +55,19 @@ pub struct ProtectionPipelineConfig {
     pub encrypt_assets: bool,
     pub encryption_algorithm: CryptoAlgorithm,
     pub generate_reports: bool,
+}
+
+impl Default for ProtectionPipelineConfig {
+    fn default() -> Self {
+        Self {
+            obfuscation: ObfuscationConfig::default(),
+            hardening: HardeningConfig::default(),
+            compression: CompressionMethod::None,
+            encrypt_assets: false,
+            encryption_algorithm: CryptoAlgorithm::Aes256Gcm,
+            generate_reports: true,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

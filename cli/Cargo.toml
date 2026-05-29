@@ -3,11 +3,14 @@ name = "reapershield-cli"
 version = "0.1.0"
 edition = "2021"
 authors = ["ReaperShield Team"]
-description = "Command line interface utility for ReaperShield binary protection and analysis suite"
+description = "ReaperShield Enterprise Executable Protection Platform (CLI + GUI)"
 
 [[bin]]
 name = "reapershield"
 path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "1.5", features = [] }
 
 [dependencies]
 serde = { workspace = true, features = ["derive"] }
@@ -18,6 +21,7 @@ clap = { workspace = true, features = ["derive"] }
 env_logger = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
+tauri = { version = "1.5", features = ["api-all", "custom-protocol"] }
 reapershield-pe-engine = { path = "../crates/pe-engine" }
 reapershield-sdk = { path = "../sdk" }
 reapershield-analyzer = { path = "../crates/analyzer" }
@@ -27,4 +31,5 @@ reapershield-obfuscation = { path = "../crates/obfuscation" }
 reapershield-hardening = { path = "../crates/hardening" }
 reapershield-telemetry = { path = "../crates/telemetry" }
 reapershield-reports = { path = "../crates/reports" }
+reapershield-visualization = { path = "../crates/visualization" }
 reapershield-evasion = { path = "../crates/evasion" }

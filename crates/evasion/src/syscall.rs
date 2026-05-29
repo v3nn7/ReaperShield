@@ -34,7 +34,7 @@ impl IndirectSyscall {
                     "call r11",
                     in("eax") syscall_number,
                     in("r11") syscall_inst_addr,
-                    out("rax") result,
+                    lateout("rax") result,
                 );
             }
             1 => {
@@ -45,7 +45,7 @@ impl IndirectSyscall {
                     in("eax") syscall_number,
                     in("rcx") arg0,
                     in("r11") syscall_inst_addr,
-                    out("rax") result,
+                    lateout("rax") result,
                 );
             }
             2 => {
@@ -58,7 +58,7 @@ impl IndirectSyscall {
                     in("rcx") arg0,
                     in("rdx") arg1,
                     in("r11") syscall_inst_addr,
-                    out("rax") result,
+                    lateout("rax") result,
                 );
             }
             3 => {
@@ -73,7 +73,7 @@ impl IndirectSyscall {
                     in("rdx") arg1,
                     in("r8") arg2,
                     in("r11") syscall_inst_addr,
-                    out("rax") result,
+                    lateout("rax") result,
                 );
             }
             4 => {
@@ -90,7 +90,7 @@ impl IndirectSyscall {
                     in("r8") arg2,
                     in("r9") arg3,
                     in("r11") syscall_inst_addr,
-                    out("rax") result,
+                    lateout("rax") result,
                 );
             }
             // Add more cases as needed for more arguments (requires stack manipulation)
@@ -102,14 +102,11 @@ impl IndirectSyscall {
 
     #[cfg(target_os = "windows")]
     fn find_syscall_gadget(module_base: usize) -> Option<usize> {
-        use windows::Win32::System::Diagnostics::Debug::{IMAGE_DOS_HEADER, IMAGE_NT_HEADERS64};
-        
         unsafe {
-            let dos_header = &*(module_base as *const IMAGE_DOS_HEADER);
-            let nt_header = &*((module_base + dos_header.e_lfanew as usize) as *const IMAGE_NT_HEADERS64);
-            let text_section = (module_base + dos_header.e_lfanew as usize + std::mem::size_of::<IMAGE_NT_HEADERS64>()) as *const u8;
+            // DOS header: e_lfanew at offset 0x3C
+            let e_lfanew = *((module_base + 0x3C) as *const u32) as usize;
             
-            // Simplified: scan the first section for 'syscall; ret' bytes (0x0F, 0x05, 0xC3)
+            // Simplified: scan the module memory for 'syscall; ret' bytes (0x0F, 0x05, 0xC3)
             let search_limit = 0x100000; // Search up to 1MB
             let ptr = module_base as *const u8;
             for i in 0..search_limit {

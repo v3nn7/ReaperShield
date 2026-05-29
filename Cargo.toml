@@ -13,7 +13,6 @@ members = [
     "crates/evasion",
     "cli",
     "sdk",
-    "gui/src-tauri"
 ]
 
 [workspace.dependencies]
