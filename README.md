@@ -133,6 +133,7 @@ edits to `gui/src/**` hot-reload without rebuilding Rust.
 | EXE opens to a blank page                            | You skipped step 2 or 3 — re-run `npm run build` and `Copy-Item` into `cli/dist/`   |
 | `proc macro panicked: distDir not found`             | `cli/dist/index.html` is missing — copy from `gui/dist/`                              |
 | WebView2 loader error on first run                   | Install [WebView2 Runtime](https://developer.microsoft.com/microsoft-edge/webview2/) |
+| "This app can't run on your PC" / SmartScreen dialog  | The Mark-of-the-Web inherited from the cargo workspace path. Quick fix: `Unblock-File "target\release\reapershield.exe"`. Or run `powershell -ExecutionPolicy Bypass -File scripts\sign.ps1` (add `-Sign` for a self-signed cert + auto-elevation). For public distribution a real EV cert is still required. |
 | `error[E0063]: missing fields api_hash_algorithm`    | Stale Rust code — `cargo clean -p reapershield-cli && cargo build --release`         |
 | GUI shows "ReaperShield CLI" placeholder             | You're running the wrong binary, or `cli/dist/` was not refreshed                     |
 
