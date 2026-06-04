@@ -46,6 +46,32 @@ enum Commands {
         json: bool,
     },
 
+    /// Code-sign an existing EXE with a self-signed dev cert (or a pre-existing
+    /// real cert). Stamps an RFC 3161 timestamp. Optionally installs the cert
+    /// into LocalMachine\TrustedPublisher (requires admin) to suppress the
+    /// SmartScreen "Unknown publisher" warning.
+    Sign {
+        /// Path to the EXE to sign in place
+        #[arg(required = true)]
+        file: PathBuf,
+
+        /// Subject of the cert to use/create (default: ReaperShield Dev)
+        #[arg(long, default_value = "CN=ReaperShield Dev, O=ReaperShield, L=Internal, C=PL")]
+        subject: String,
+
+        /// Path to signtool.exe. Auto-detected from Windows SDK if omitted.
+        #[arg(long)]
+        signtool: Option<PathBuf>,
+
+        /// RFC 3161 timestamp URL. Set to "none" to skip the timestamp.
+        #[arg(long, default_value = "http://timestamp.digicert.com")]
+        timestamp: String,
+
+        /// Install the cert into LocalMachine\TrustedPublisher (requires admin)
+        #[arg(long, default_value_t = false)]
+        trust: bool,
+    },
+
     /// Apply comprehensive, multi-layered enterprise protection to a binary
     Protect {
         /// Path to the source executable
@@ -71,6 +97,17 @@ enum Commands {
         /// Choose compression strategy (none, zstd, lzma)
         #[arg(long, default_value_t = String::from("zstd"))]
         compression: String,
+
+        /// Code-sign the protected output with a self-signed dev cert.
+        /// Stamps an RFC 3161 timestamp.
+        #[arg(long, default_value_t = false)]
+        sign: bool,
+
+        /// Install the signing cert into LocalMachine\TrustedPublisher
+        /// (requires admin) to suppress the SmartScreen warning on this
+        /// machine. Implies --sign.
+        #[arg(long, default_value_t = false)]
+        trust: bool,
     },
 
     /// Apply isolated structural code and layout obfuscation to a binary
@@ -345,6 +382,28 @@ fn tauri_analyze_buffer_hex(
         .map_err(|e| format!("Buffer analysis failed: {}", e))
 }
 
+/// Sign an EXE in place using the SDK's built-in code-signing helper.
+/// Returns the full SignStatus so the GUI can show the signer + thumbprint.
+#[tauri::command]
+fn tauri_sign_binary(
+    file: String,
+    subject: Option<String>,
+    trust_locally: bool,
+) -> Result<reapershield_sdk::SignStatus, String> {
+    let config = reapershield_sdk::PostSignConfig {
+        self_signed: true,
+        cert_subject: subject.unwrap_or_else(||
+            "CN=ReaperShield Dev, O=ReaperShield, L=Internal, C=PL".to_string()
+        ),
+        signtool_path: None,
+        timestamp_url: Some("http://timestamp.digicert.com".to_string()),
+        trust_locally,
+    };
+    let path = Path::new(&file);
+    if !path.exists() { return Err(format!("File not found: {}", file)); }
+    Ok(reapershield_sdk::signer::sign_exe(path, &config))
+}
+
 #[tauri::command]
 fn tauri_analyze_file(path: String) -> Result<PeReport, String> {
     let path_ref = Path::new(&path);
@@ -506,13 +565,6 @@ fn tauri_inject_payload(pid: u32, payload_path: String, method: String) -> Resul
 
 // ── Main ────────────────────────────────────────────────────────────
 
-fn print_help_and_exit() -> ! {
-    use clap::CommandFactory;
-    let _ = Cli::command().print_help();
-    println!();
-    std::process::exit(1);
-}
-
 fn main() -> anyhow::Result<()> {
     let args = Cli::parse();
 
@@ -531,6 +583,7 @@ fn main() -> anyhow::Result<()> {
                     tauri_get_visuals,
                     tauri_protect_binary,
                     tauri_protect_binary_with_diff,
+                    tauri_sign_binary,
                     tauri_generate_report,
                     tauri_get_telemetry,
                     tauri_hollow_process,
@@ -556,6 +609,7 @@ fn main() -> anyhow::Result<()> {
                     tauri_get_visuals,
                     tauri_protect_binary,
                     tauri_protect_binary_with_diff,
+                    tauri_sign_binary,
                     tauri_generate_report,
                     tauri_get_telemetry,
                     tauri_hollow_process,
@@ -585,7 +639,7 @@ fn main() -> anyhow::Result<()> {
             }
         }
 
-        Some(Commands::Protect { input, output, passphrase, obfuscate, hardening, compression }) => {
+        Some(Commands::Protect { input, output, passphrase, obfuscate, hardening, compression, sign, trust }) => {
             env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
             if !input.exists() {
                 anyhow::bail!("Error: Input file does not exist at path {:?}", input);
@@ -620,6 +674,17 @@ fn main() -> anyhow::Result<()> {
                 encrypt_assets: passphrase.is_some(),
                 encryption_algorithm: CryptoAlgorithm::Aes256Gcm,
                 generate_reports: true,
+                post_sign: if sign || trust {
+                    Some(reapershield_sdk::PostSignConfig {
+                        self_signed: true,
+                        cert_subject: "CN=ReaperShield Dev, O=ReaperShield, L=Internal, C=PL".to_string(),
+                        signtool_path: None,
+                        timestamp_url: Some("http://timestamp.digicert.com".to_string()),
+                        trust_locally: trust,
+                    })
+                } else {
+                    None
+                },
             };
             println!("[*] Running ReaperShield Protection Pipeline on {:?}", input);
             let summary = ReaperShieldSdk::protect_binary(&input, &out_file, &config, passphrase.as_ref().map(|s| s.as_bytes()))?;
@@ -834,6 +899,30 @@ fn main() -> anyhow::Result<()> {
             if let Some(h) = &result.hollowing { println!("    Hollowing: PID {}", h.pid); }
             if let Some(p) = &result.persistence { println!("    Persistence: {} at {}", p.technique, p.location); }
             if let Some(b) = &result.bypass { println!("    Bypass: {} bypassed", b.bypassed_count); }
+        }
+
+        Some(Commands::Sign { file, subject, signtool, timestamp, trust }) => {
+            if !file.exists() { anyhow::bail!("Error: File does not exist at path {:?}", file); }
+            let ts_arg = if timestamp.eq_ignore_ascii_case("none") { None } else { Some(timestamp) };
+            let config = reapershield_sdk::PostSignConfig {
+                self_signed: true,
+                cert_subject: subject,
+                signtool_path: signtool,
+                timestamp_url: ts_arg,
+                trust_locally: trust,
+            };
+            println!("[*] Code-signing {:?}", file);
+            let status = reapershield_sdk::signer::sign_exe(&file, &config);
+            if status.signed {
+                println!("[+] Signed successfully");
+                println!("    Signer:    {}", status.signer);
+                println!("    Thumbprint: {}", status.cert_thumbprint.unwrap_or_default());
+                if let Some(ts) = status.timestamp { println!("    Signed at:  {}", ts); }
+                if status.trusted_locally { println!("    Trusted:    YES (added to LocalMachine\\TrustedPublisher)"); }
+            } else {
+                eprintln!("[-] Signing failed: {}", status.error.unwrap_or_else(|| "unknown".into()));
+                std::process::exit(2);
+            }
         }
     }
 

@@ -26,7 +26,7 @@ CLI on top.
 The CLI binary is a Tauri app. It **embeds the React GUI at compile time**, so
 the Vite build **must** run *before* the Rust release build, or the EXE will
 show a blank page. The build order is fixed by Tauri's `generate_context!()`
-proc macro.
+proc macro — but `scripts\build.ps1` + `cli\build.rs` automate the whole thing.
 
 ### 1. One-time toolchain check
 
@@ -37,44 +37,38 @@ cargo --version
 rustc --version
 ```
 
-### 2. Build the React frontend
+### 2. Single-command build (recommended)
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\build.ps1
+```
+
+That command does, in order:
+1. `npm install` in `gui/` (skipped if `node_modules/` already present)
+2. `npm run build` → `gui/dist/`
+3. Mirrors `gui/dist/` → `cli/dist/` (where `tauri::generate_context!()` reads from)
+4. `cargo build --release -p reapershield-cli`
+5. `Unblock-File` on the resulting EXE (kills the Mark-of-the-Web dialog)
+
+Output: `target\release\reapershield.exe` (~12 MB).
+
+Flags:
+- `-SkipGui` — skip the npm steps (when you only changed Rust code)
+- `-Debug` — produce `target\debug\reapershield.exe` instead of release
+
+### 3. Manual build (if you want to see each step)
 
 ```powershell
 cd gui
 npm install        # ~180 packages, downloads once
 npm run build      # Vite produces gui/dist/{index.html, assets/*}
 cd ..
-```
-
-Expected output:
-
-```
-dist/index.html                   0.63 kB │ gzip:   0.40 kB
-dist/assets/index--JTpZ91v.css   16.14 kB │ gzip:   3.74 kB
-dist/assets/index-qdD59KSM.js    31.76 kB │ gzip:   6.98 kB
-dist/assets/index-Yv7eXR5T.js   568.19 kB │ gzip: 160.91 kB
-```
-
-### 3. Stage the frontend where Tauri's macro can find it
-
-The CLI binary's `cli/tauri.conf.json` sets `distDir: "./dist"`, so the
-Vite output must be mirrored into `cli/dist/`:
-
-```powershell
 Copy-Item -Path gui\dist\* -Destination cli\dist\ -Recurse -Force
-```
-
-(Or just `xcopy /E /Y gui\dist cli\dist` if you prefer.)
-
-### 4. Build the Rust release binary
-
-```powershell
 cargo build --release -p reapershield-cli
+Unblock-File target\release\reapershield.exe
 ```
 
-Output: `target\release\reapershield.exe` (~12 MB).
-
-### 5. Launch
+### 4. Launch
 
 ```powershell
 .\target\release\reapershield.exe
@@ -93,16 +87,55 @@ With subcommands → CLI mode:
 ### Rebuild loop (after editing React code)
 
 ```powershell
-cd gui; npm run build; cd ..
-Copy-Item -Path gui\dist\* -Destination cli\dist\ -Recurse -Force
-cargo build --release -p reapershield-cli
+powershell -ExecutionPolicy Bypass -File scripts\build.ps1
 ```
 
 ### Rebuild loop (after editing Rust code)
 
 ```powershell
-cargo build --release -p reapershield-cli
+powershell -ExecutionPolicy Bypass -File scripts\build.ps1 -SkipGui
 ```
+
+The `cli\build.rs` also auto-detects when `gui/dist` is newer than
+`cli/dist` and re-stages it during a plain `cargo build`, so even the
+manual loop stays sane.
+
+### Sign the output (built into the pipeline)
+
+The signer lives in `sdk\src\signer.rs` and is wired into the protection
+pipeline as the very last step (step 5b, right after the file is written
+and before the post-protection analysis report is generated).
+
+```powershell
+# Standalone - sign any EXE
+.\reapershield.exe sign path\to\binary.exe
+
+# As the last step of the protection pipeline
+.\reapershield.exe protect target.exe --output out.exe --sign
+
+# Auto-elevate, add cert to LocalMachine\TrustedPublisher, then run the
+# full pipeline in one command (kills the SmartScreen dialog permanently
+# for this machine)
+powershell -ExecutionPolicy Bypass -File scripts\protect-and-trust.ps1 `
+    -Input target.exe `
+    -Output target_protected.exe
+```
+
+What the auto-signer does:
+1. Finds (or generates, on first run) a self-signed SHA-256 code-signing
+   cert in `CurrentUser\My` (5-year validity, RSA-2048).
+2. Locates `signtool.exe` from the Windows SDK, or falls back to
+   `Set-AuthenticodeSignature` via PowerShell.
+3. Stamps an RFC 3161 timestamp (`timestamp.digicert.com` by default).
+4. If `--trust` is passed, copies the cert to `LocalMachine\TrustedPublisher`
+   (requires admin via the auto-elevating wrapper script).
+
+The signer result (thumbprint, signer subject, timestamp, trust status) is
+returned to the GUI in `ProtectionSummary.sign_status` and shown in the
+"After" panel.
+
+For public distribution replace the self-signed cert with a real EV
+code-signing cert from DigiCert, Sectigo, etc.
 
 ### Tests
 

@@ -9,6 +9,8 @@ use reapershield_telemetry::{TelemetryEvent, TelemetryLevel, TelemetryManager};
 use reapershield_visualization::{BinaryVisuals, VisualizationEngine};
 use reapershield_evasion::{EvasionEngine, EvasionReport};
 
+pub mod signer;
+
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::fs::File;
@@ -55,6 +57,9 @@ pub struct ProtectionPipelineConfig {
     pub encrypt_assets: bool,
     pub encryption_algorithm: CryptoAlgorithm,
     pub generate_reports: bool,
+    /// Optional: code-sign the output EXE after protection finishes.
+    /// If `None`, no signing is attempted.
+    pub post_sign: Option<PostSignConfig>,
 }
 
 impl Default for ProtectionPipelineConfig {
@@ -66,8 +71,55 @@ impl Default for ProtectionPipelineConfig {
             encrypt_assets: false,
             encryption_algorithm: CryptoAlgorithm::Aes256Gcm,
             generate_reports: true,
+            post_sign: None,
         }
     }
+}
+
+/// Configuration for the auto-sign step that runs as the final stage of
+/// `protect_binary`. All fields are optional - sensible defaults kick in
+/// (self-signed dev cert, RFC 3161 timestamp from digicert).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PostSignConfig {
+    /// Use a self-signed dev cert (created on demand in the user's store).
+    /// Set to `false` to require a pre-existing real cert in `LocalMachine\My`.
+    pub self_signed: bool,
+    /// Subject of the self-signed cert to create/find (e.g. "ReaperShield Dev").
+    pub cert_subject: String,
+    /// Optional path to `signtool.exe`. If `None`, the SDK searches PATH and
+    /// the Windows SDK install dir. Falls back to PowerShell's
+    /// `Set-AuthenticodeSignature` when neither is available.
+    pub signtool_path: Option<PathBuf>,
+    /// RFC 3161 timestamp server URL. None = no timestamp (signature will
+    /// expire when the cert does).
+    pub timestamp_url: Option<String>,
+    /// Add the cert to LocalMachine\TrustedPublisher so SmartScreen stops
+    /// warning on this machine. Requires admin. If false, the cert stays
+    /// in CurrentUser\My and the EXE shows the standard "Unknown publisher".
+    pub trust_locally: bool,
+}
+
+impl Default for PostSignConfig {
+    fn default() -> Self {
+        Self {
+            self_signed: true,
+            cert_subject: "CN=ReaperShield Dev, O=ReaperShield, L=Internal, C=PL".to_string(),
+            signtool_path: None,
+            timestamp_url: Some("http://timestamp.digicert.com".to_string()),
+            trust_locally: false,
+        }
+    }
+}
+
+/// Result of the post-sign step.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SignStatus {
+    pub signed: bool,
+    pub signer: String,
+    pub timestamp: Option<chrono::DateTime<Utc>>,
+    pub cert_thumbprint: Option<String>,
+    pub trusted_locally: bool,
+    pub error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -86,6 +138,8 @@ pub struct ProtectionSummary {
     pub obfuscation_metrics: Option<ObfuscationMetrics>,
     /// Per-field diff between initial and final state, ready for the GUI.
     pub diff: ProtectionDiff,
+    /// Result of the optional post-protection code-signing step.
+    pub sign_status: Option<SignStatus>,
 }
 
 /// Computed per-field delta between the initial and final PeReport.
@@ -277,6 +331,41 @@ impl ReaperShieldSdk {
         // 5. Save the final binary
         std::fs::write(output_path_ref, &buffer)?;
 
+        // 5b. Optional: code-sign the output so SmartScreen stops complaining
+        // and the protected binary ships with a verifiable Authenticode sig.
+        let sign_status = config.post_sign.as_ref().map(|cfg| {
+            telemetry_manager.log_event(
+                TelemetryLevel::Info,
+                TelemetryEvent::GenericMessage {
+                    subsystem: "Signer".to_string(),
+                    message: format!(
+                        "Code-signing output with cert subject: {}",
+                        cfg.cert_subject
+                    ),
+                },
+            );
+            signer::sign_exe(output_path_ref, cfg)
+        });
+        if let Some(s) = &sign_status {
+            if s.signed {
+                telemetry_manager.log_event(
+                    TelemetryLevel::Info,
+                    TelemetryEvent::GenericMessage {
+                        subsystem: "Signer".to_string(),
+                        message: format!("Signed successfully. Thumbprint: {:?}", s.cert_thumbprint),
+                    },
+                );
+            } else if let Some(err) = &s.error {
+                telemetry_manager.log_event(
+                    TelemetryLevel::Warning,
+                    TelemetryEvent::GenericMessage {
+                        subsystem: "Signer".to_string(),
+                        message: format!("Signing failed (non-fatal): {}", err),
+                    },
+                );
+            }
+        }
+
         // 6. Post-protection Analysis to generate security progression charts
         let final_report_res = PeAnalyzer::analyze_buffer(
             &buffer,
@@ -355,6 +444,7 @@ impl ReaperShieldSdk {
             final_report: final_report,
             obfuscation_metrics,
             diff,
+            sign_status,
         })
     }
 }
