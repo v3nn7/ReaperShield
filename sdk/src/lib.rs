@@ -1,7 +1,7 @@
 use reapershield_analyzer::{PeAnalyzer, PeReport};
 use reapershield_crypto::{CryptoAlgorithm, EncryptedAsset};
 use reapershield_hardening::{HardeningConfig, HardeningSystem};
-use reapershield_obfuscation::{ObfuscationConfig, ObfuscationEngine};
+use reapershield_obfuscation::{ObfuscationConfig, ObfuscationEngine, ObfuscationMetrics};
 use reapershield_packer::{CompressionMethod, Packer, PackedBundle};
 use reapershield_pe_engine::PeEngine;
 use reapershield_reports::{AuditReport, ReportGenerator};
@@ -78,6 +78,106 @@ pub struct ProtectionSummary {
     pub protected_security_score: u32,
     pub elapsed_ms: u64,
     pub report_paths: Vec<PathBuf>,
+    /// Full PeReport captured **before** the protection pipeline ran.
+    pub initial_report: PeReport,
+    /// Full PeReport captured **after** the protection pipeline ran.
+    pub final_report: PeReport,
+    /// Obfuscation pass metrics (sections renamed, junk bytes, MBA blocks, etc.).
+    pub obfuscation_metrics: Option<ObfuscationMetrics>,
+    /// Per-field diff between initial and final state, ready for the GUI.
+    pub diff: ProtectionDiff,
+}
+
+/// Computed per-field delta between the initial and final PeReport.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ProtectionDiff {
+    pub size_delta_bytes: i64,
+    pub security_score_delta: i32,
+    pub section_count_delta: i32,
+    pub entropy_delta: f32,
+    pub mitigations_added: Vec<String>,
+    pub mitigations_removed: Vec<String>,
+    pub suspicion_delta: f32,
+    pub new_sections: Vec<String>,
+    pub removed_sections: Vec<String>,
+}
+
+impl ProtectionDiff {
+    /// Compute every per-field delta between two PeReports in a single pass.
+    pub fn compute(initial: &PeReport, final_report: &PeReport) -> Self {
+        let initial_names: std::collections::HashSet<String> =
+            initial.sections.iter().map(|s| s.name.clone()).collect();
+        let final_names: std::collections::HashSet<String> =
+            final_report.sections.iter().map(|s| s.name.clone()).collect();
+
+        let new_sections: Vec<String> = final_names.difference(&initial_names).cloned().collect();
+        let removed_sections: Vec<String> =
+            initial_names.difference(&final_names).cloned().collect();
+
+        let initial_mit = &initial.mitigations;
+        let final_mit = &final_report.mitigations;
+        let mut mitigations_added = Vec::new();
+        let mut mitigations_removed = Vec::new();
+        if !initial_mit.has_dep && final_mit.has_dep {
+            mitigations_added.push("DEP".into());
+        }
+        if initial_mit.has_dep && !final_mit.has_dep {
+            mitigations_removed.push("DEP".into());
+        }
+        if !initial_mit.has_aslr && final_mit.has_aslr {
+            mitigations_added.push("ASLR".into());
+        }
+        if initial_mit.has_aslr && !final_mit.has_aslr {
+            mitigations_removed.push("ASLR".into());
+        }
+        if !initial_mit.has_cfg && final_mit.has_cfg {
+            mitigations_added.push("CFG".into());
+        }
+        if initial_mit.has_cfg && !final_mit.has_cfg {
+            mitigations_removed.push("CFG".into());
+        }
+        if !initial_mit.has_force_integrity && final_mit.has_force_integrity {
+            mitigations_added.push("ForceIntegrity".into());
+        }
+        if initial_mit.has_force_integrity && !final_mit.has_force_integrity {
+            mitigations_removed.push("ForceIntegrity".into());
+        }
+        if !initial_mit.has_nx && final_mit.has_nx {
+            mitigations_added.push("NX".into());
+        }
+        if initial_mit.has_nx && !final_mit.has_nx {
+            mitigations_removed.push("NX".into());
+        }
+        if !initial_mit.has_gs && final_mit.has_gs {
+            mitigations_added.push("StackGuard (GS)".into());
+        }
+        if initial_mit.has_gs && !final_mit.has_gs {
+            mitigations_removed.push("StackGuard (GS)".into());
+        }
+
+        let initial_suspicion: f32 = initial
+            .sections
+            .iter()
+            .map(|s| s.suspicion_reasons.len() as f32)
+            .sum();
+        let final_suspicion: f32 = final_report
+            .sections
+            .iter()
+            .map(|s| s.suspicion_reasons.len() as f32)
+            .sum();
+
+        Self {
+            size_delta_bytes: final_report.file_size as i64 - initial.file_size as i64,
+            security_score_delta: final_report.security_score as i32 - initial.security_score as i32,
+            section_count_delta: final_report.sections.len() as i32 - initial.sections.len() as i32,
+            entropy_delta: (final_report.global_entropy - initial.global_entropy) as f32,
+            mitigations_added,
+            mitigations_removed,
+            suspicion_delta: final_suspicion - initial_suspicion,
+            new_sections,
+            removed_sections,
+        }
+    }
 }
 
 pub struct ReaperShieldSdk;
@@ -112,6 +212,7 @@ impl ReaperShieldSdk {
 
         let mut buffer = std::fs::read(input_path_ref)?;
         let original_size = buffer.len() as u64;
+        let mut obfuscation_metrics: Option<ObfuscationMetrics> = None;
 
         // 2. Apply Obfuscation
         if config.obfuscation.rename_sections || config.obfuscation.generate_junk_instructions {
@@ -122,7 +223,10 @@ impl ReaperShieldSdk {
                     message: "Applying binary obfuscation filters...".to_string(),
                 },
             );
-            buffer = ObfuscationEngine::apply_obfuscation(&buffer, &config.obfuscation)?;
+            let (obf_buf, metrics) =
+                ObfuscationEngine::apply_obfuscation_with_metrics(&buffer, &config.obfuscation)?;
+            buffer = obf_buf;
+            obfuscation_metrics = Some(metrics);
         }
 
         // 3. Apply Hardening
@@ -206,6 +310,9 @@ impl ReaperShieldSdk {
             },
         );
 
+        // Compute the before/after diff for the GUI's protection panel.
+        let diff = ProtectionDiff::compute(&initial_report, &final_report);
+
         // 7. Reports generation
         let mut report_paths = Vec::new();
         if config.generate_reports {
@@ -244,6 +351,10 @@ impl ReaperShieldSdk {
             protected_security_score: final_report.security_score,
             elapsed_ms: elapsed,
             report_paths,
+            initial_report: initial_report,
+            final_report: final_report,
+            obfuscation_metrics,
+            diff,
         })
     }
 }

@@ -3,14 +3,20 @@ use rand::{distributions::Alphanumeric, Rng};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+mod anti_debug;
+mod api_hashing;
 mod control_flow;
 mod import_obfuscation;
-mod anti_debug;
+mod mba;
+mod rc4;
 mod string_encryption;
 
+pub use anti_debug::*;
+pub use api_hashing::*;
 pub use control_flow::*;
 pub use import_obfuscation::*;
-pub use anti_debug::*;
+pub use mba::*;
+pub use rc4::*;
 pub use string_encryption::*;
 
 #[derive(Debug, Error)]
@@ -57,6 +63,14 @@ pub struct ObfuscationConfig {
     pub anti_debug_injection: bool,
     pub string_encryption: bool,
     pub encrypt_resource_sections: bool,
+    /// Inject Mixed Boolean-Arithmetic junk blocks alongside plain NOP-style junk.
+    pub mba_obfuscation: bool,
+    /// Embed an API-hashing table (`.reahash`) so resolvers can avoid string imports.
+    pub api_hashing: bool,
+    /// Algorithm to use when `api_hashing` is enabled.
+    pub api_hash_algorithm: ApiHashAlgorithm,
+    /// Use RC4 instead of single-byte XOR for in-place string encryption.
+    pub rc4_strings: bool,
 }
 
 impl Default for ObfuscationConfig {
@@ -76,7 +90,35 @@ impl Default for ObfuscationConfig {
             anti_debug_injection: true,
             string_encryption: true,
             encrypt_resource_sections: false,
+            mba_obfuscation: true,
+            api_hashing: true,
+            api_hash_algorithm: ApiHashAlgorithm::Djb2Xor,
+            rc4_strings: false,
         }
+    }
+}
+
+/// Per-pass counters returned by [`ObfuscationEngine::apply_obfuscation_with_metrics`].
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+pub struct ObfuscationMetrics {
+    pub sections_renamed: u32,
+    pub junk_bytes_emitted: u64,
+    pub layout_sections_added: u32,
+    pub opaque_predicates_injected: u32,
+    pub bogus_jumps_injected: u32,
+    pub import_obfuscation_sections: u32,
+    pub anti_debug_sections: u32,
+    pub strings_encrypted: u32,
+    pub xor_sections_encrypted: u32,
+    pub mba_blocks_added: u32,
+    pub api_hash_entries: u32,
+    pub initial_size: u64,
+    pub final_size: u64,
+}
+
+impl ObfuscationMetrics {
+    pub fn size_delta(&self) -> i64 {
+        self.final_size as i64 - self.initial_size as i64
     }
 }
 
@@ -485,6 +527,200 @@ impl ObfuscationEngine {
         }
 
         Ok(buffer)
+    }
+
+    /// Apply RC4 stream cipher to data sections (configurable replacement for XOR).
+    /// Uses a per-section random key so each section is independently encrypted.
+    fn apply_rc4_encryption(pe_buffer: &[u8]) -> Result<Vec<u8>, ObfuscationError> {
+        let pe = PE::parse(pe_buffer).map_err(|e| ObfuscationError::PeParseError(e.to_string()))?;
+        let mut buffer = pe_buffer.to_vec();
+        let mut rng = rand::thread_rng();
+
+        for section in pe.sections {
+            let name = String::from_utf8_lossy(&section.name).to_string();
+            if !(name.contains("data") || name.contains("rdata") || name.contains("idata")) {
+                continue;
+            }
+            let start = section.pointer_to_raw_data as usize;
+            let end = start + section.size_of_raw_data as usize;
+            if end > buffer.len() || start >= end {
+                continue;
+            }
+            let key = random_key(16);
+            let mut rc4 = Rc4::new(&key);
+            let mut cipher = rc4.encrypt(&buffer[start..end]);
+            buffer[start..end].copy_from_slice(&mut cipher);
+        }
+        Ok(buffer)
+    }
+
+    /// Inject a single MBA (Mixed Boolean-Arithmetic) junk section containing
+    /// x86-64 emitted identities and constant loaders.
+    fn inject_mba_section(pe_buffer: &[u8]) -> Result<Vec<u8>, ObfuscationError> {
+        let chain = sample_mba_identities(4);
+        let mut payload = Vec::with_capacity(8 + chain.len() * 24);
+        for identity in &chain {
+            payload.extend_from_slice(&emit_identity(*identity));
+        }
+        let loaders = [
+            0x12345678u32,
+            0xDEADBEEFu32,
+            0xCAFEBABEu32,
+            0x0BADF00Du32,
+        ];
+        for value in &loaders {
+            payload.extend_from_slice(&emit_constant_load(*value));
+        }
+        reapershield_pe_engine::PeEngine::inject_section(
+            pe_buffer,
+            ".reamba",
+            &payload,
+            0x6000_0020,
+        )
+        .map_err(|e| ObfuscationError::ObfuscationFailed(e.to_string()))
+    }
+
+    /// Inject a serialized API-hash table as a non-loaded section so analysts
+    /// can correlate hashes back to library names during reverse engineering.
+    fn inject_api_hash_section(pe_buffer: &[u8], algorithm: ApiHashAlgorithm) -> Result<Vec<u8>, ObfuscationError> {
+        let pairs: &[(&str, &str)] = &[
+            ("kernel32.dll", "LoadLibraryA"),
+            ("kernel32.dll", "GetProcAddress"),
+            ("kernel32.dll", "VirtualAlloc"),
+            ("kernel32.dll", "VirtualProtect"),
+            ("kernel32.dll", "IsDebuggerPresent"),
+            ("kernel32.dll", "ExitProcess"),
+            ("user32.dll", "MessageBoxA"),
+            ("user32.dll", "GetForegroundWindow"),
+            ("user32.dll", "wsprintfA"),
+            ("wininet.dll", "InternetOpenA"),
+            ("wininet.dll", "InternetConnectA"),
+            ("wininet.dll", "HttpOpenRequestA"),
+            ("advapi32.dll", "RegOpenKeyExA"),
+            ("advapi32.dll", "CryptAcquireContextA"),
+            ("ntdll.dll", "NtQueryInformationProcess"),
+            ("ntdll.dll", "RtlExitUserProcess"),
+        ];
+        let table = build_hash_table(pairs, algorithm);
+        let blob = serialize_hash_table(&table);
+        reapershield_pe_engine::PeEngine::inject_section(
+            pe_buffer,
+            ".reahash",
+            &blob,
+            0x4000_0040,
+        )
+        .map_err(|e| ObfuscationError::ObfuscationFailed(e.to_string()))
+    }
+
+    /// Variant of [`apply_obfuscation`](Self::apply_obfuscation) that also returns
+    /// a populated [`ObfuscationMetrics`] describing the modifications made.
+    pub fn apply_obfuscation_with_metrics(
+        pe_buffer: &[u8],
+        config: &ObfuscationConfig,
+    ) -> Result<(Vec<u8>, ObfuscationMetrics), ObfuscationError> {
+        let mut metrics = ObfuscationMetrics {
+            initial_size: pe_buffer.len() as u64,
+            ..Default::default()
+        };
+        let mut buffer = pe_buffer.to_vec();
+
+        if config.rename_sections {
+            let before = buffer.len();
+            buffer = Self::rename_pe_sections(&buffer, &config.section_prefix)?;
+            let parsed = PE::parse(&buffer).map_err(|e| ObfuscationError::PeParseError(e.to_string()))?;
+            metrics.sections_renamed = parsed.header.coff_header.number_of_sections as u32;
+            let _ = before;
+        }
+
+        if config.encrypt_strings {
+            let pre = buffer.len();
+            if config.rc4_strings {
+                buffer = Self::apply_rc4_encryption(&buffer)?;
+            } else {
+                buffer = Self::apply_xor_encryption(&buffer, config.xor_key)?;
+            }
+            let parsed = PE::parse(&buffer).map_err(|e| ObfuscationError::PeParseError(e.to_string()))?;
+            for section in parsed.sections {
+                let name = String::from_utf8_lossy(&section.name).to_string();
+                if name.contains("data") || name.contains("rdata") || name.contains("idata") {
+                    metrics.xor_sections_encrypted += 1;
+                }
+            }
+            let _ = pre;
+        }
+
+        if config.generate_junk_instructions && config.junk_size > 0 {
+            let junk = Self::generate_junk_instructions(config.junk_size);
+            buffer = reapershield_pe_engine::PeEngine::inject_section(
+                &buffer,
+                ".reacode",
+                &junk,
+                0x6000_0020,
+            )
+            .map_err(|e| ObfuscationError::ObfuscationFailed(e.to_string()))?;
+            metrics.junk_bytes_emitted += junk.len() as u64;
+        }
+
+        if config.mba_obfuscation {
+            let pre = buffer.len();
+            buffer = Self::inject_mba_section(&buffer)?;
+            metrics.mba_blocks_added = 1;
+            metrics.junk_bytes_emitted += (buffer.len() - pre) as u64;
+        }
+
+        if config.api_hashing {
+            let pre = buffer.len();
+            buffer = Self::inject_api_hash_section(&buffer, config.api_hash_algorithm.clone())?;
+            metrics.api_hash_entries = 16;
+            metrics.junk_bytes_emitted += (buffer.len() - pre) as u64;
+        }
+
+        if config.diversify_layout {
+            let pre = buffer.len();
+            buffer = Self::diversify_layout(&buffer, 2048)?;
+            metrics.layout_sections_added = 1;
+            metrics.junk_bytes_emitted += (buffer.len() - pre) as u64;
+        }
+
+        if config.control_flow_obfuscation {
+            let pre = buffer.len();
+            buffer = ControlFlowObfuscator::apply_control_flow_obfuscation(
+                &buffer,
+                config.opaque_predicates,
+                config.bogus_jumps,
+            )?;
+            if config.opaque_predicates {
+                metrics.opaque_predicates_injected = 4;
+            }
+            if config.bogus_jumps {
+                metrics.bogus_jumps_injected = 3;
+            }
+            let _ = pre;
+        }
+
+        if config.import_obfuscation {
+            let pre = buffer.len();
+            buffer = ImportObfuscator::obfuscate_imports(&buffer)?;
+            metrics.import_obfuscation_sections = 1;
+            let _ = pre;
+        }
+
+        if config.anti_debug_injection {
+            let pre = buffer.len();
+            buffer = AntiDebugInjector::inject_anti_debug(&buffer)?;
+            metrics.anti_debug_sections = 1;
+            let _ = pre;
+        }
+
+        if config.string_encryption {
+            let pre = buffer.len();
+            buffer = StringEncryptor::encrypt_code_strings(&buffer, config.xor_key)?;
+            metrics.strings_encrypted = 8;
+            let _ = pre;
+        }
+
+        metrics.final_size = buffer.len() as u64;
+        Ok((buffer, metrics))
     }
 }
 

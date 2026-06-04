@@ -99,6 +99,7 @@ export default function App() {
   const [analysisReport, setAnalysisReport] = useState<any>(emptyPeReport);
   const [telemetryLogs, setTelemetryLogs] = useState<DashboardTelemetryLog[]>([]);
   const [entropyData, setEntropyData] = useState<EntropyPoint[]>(emptyEntropyData);
+  const [errorMessage, setErrorMessage] = useState<string>("");
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [pipelineSummary, setPipelineSummary] = useState<any | null>(null);
 
@@ -334,15 +335,35 @@ export default function App() {
       <main className="flex-1 flex flex-col bg-enterprise-950 overflow-hidden">
         {/* Global Toolbar Header */}
         <header className="h-16 border-b border-enterprise-700 flex items-center justify-between px-8 bg-enterprise-900/50">
-          <div className="flex items-center space-x-4 w-1/2">
+          <div className="flex items-center space-x-3 w-1/2">
             <Folder className="h-4 w-4 text-enterprise-200" />
             <input
               type="text"
               value={currentFilePath}
               onChange={(e) => setCurrentFilePath(e.target.value)}
-              className="w-full bg-enterprise-950 text-xs px-3 py-2 rounded border border-enterprise-700 focus:outline-none focus:border-blue-500 font-mono text-enterprise-100"
-              placeholder="Target binary absolute path (.exe)"
+              className="flex-1 bg-enterprise-950 text-xs px-3 py-2 rounded border border-enterprise-700 focus:outline-none focus:border-blue-500 font-mono text-enterprise-100"
+              placeholder="Target binary absolute path (.exe) — or click Browse…"
             />
+            <button
+              onClick={async () => {
+                try {
+                  const { invoke } = await import("@tauri-apps/api");
+                  const picked = (await invoke("tauri_pick_file")) as string | null;
+                  if (picked) {
+                    setCurrentFilePath(picked);
+                    setAnalysisReport(emptyPeReport);
+                    setEntropyData(emptyEntropyData);
+                  }
+                } catch (err) {
+                  setErrorMessage(`File picker failed: ${String(err)}`);
+                }
+              }}
+              title="Open native OS file dialog"
+              className="bg-enterprise-800 hover:bg-enterprise-700 text-enterprise-100 font-medium px-3 py-2 rounded text-xs transition border border-enterprise-600 flex items-center space-x-1"
+            >
+              <Folder className="h-3.5 w-3.5" />
+              <span>Browse</span>
+            </button>
           </div>
           <div className="flex items-center space-x-3">
             <button

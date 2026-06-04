@@ -287,6 +287,64 @@ enum Commands {
 
 // ── Tauri GUI commands ──────────────────────────────────────────────
 
+/// Open a native OS file-picker for a PE/EXE target. Returns the absolute
+/// path of the selected file, or `None` if the user cancelled.
+#[tauri::command]
+fn tauri_pick_file() -> Result<Option<String>, String> {
+    let result = rfd::FileDialog::new()
+        .add_filter("PE / Executable", &["exe", "dll", "sys", "ocx", "scr"])
+        .add_filter("All files", &["*"])
+        .set_title("Select a PE binary to analyze or protect")
+        .pick_file();
+    Ok(result.map(|p| p.to_string_lossy().to_string()))
+}
+
+/// Same as `tauri_pick_file` but for picking the **output** destination.
+#[tauri::command]
+fn tauri_pick_save_file(suggested_name: Option<String>) -> Result<Option<String>, String> {
+    let mut dialog = rfd::FileDialog::new()
+        .add_filter("PE / Executable", &["exe", "dll"])
+        .set_title("Choose where to save the protected binary");
+    if let Some(name) = suggested_name {
+        dialog = dialog.set_file_name(&name);
+    }
+    Ok(dialog.save_file().map(|p| p.to_string_lossy().to_string()))
+}
+
+/// Run the SDK protection pipeline and return the full summary (with the
+/// new `initial_report`, `final_report`, and `diff` fields populated).
+/// This is the preferred command for the GUI — it powers the "Before vs
+/// After" comparison panel.
+#[tauri::command]
+fn tauri_protect_binary_with_diff(
+    input_path: String,
+    output_path: String,
+    config: ProtectionPipelineConfig,
+    passphrase: Option<String>,
+) -> Result<reapershield_sdk::ProtectionSummary, String> {
+    let input_ref = Path::new(&input_path);
+    let output_ref = Path::new(&output_path);
+    if !input_ref.exists() {
+        return Err("Input file does not exist.".to_string());
+    }
+    let pass_bytes = passphrase.as_ref().map(|p| p.as_bytes());
+    ReaperShieldSdk::protect_binary(input_ref, output_ref, &config, pass_bytes)
+        .map_err(|e| format!("Protection pipeline failed: {}", e))
+}
+
+/// Re-parse a previously protected binary and return its current PeReport —
+/// used by the GUI to refresh visuals after protection without re-running
+/// the full pipeline.
+#[tauri::command]
+fn tauri_analyze_buffer_hex(
+    file_name: String,
+    hex_data: String,
+) -> Result<PeReport, String> {
+    let bytes = hex::decode(hex_data.trim()).map_err(|e| format!("Invalid hex: {}", e))?;
+    PeAnalyzer::analyze_buffer(&bytes, file_name, bytes.len() as u64)
+        .map_err(|e| format!("Buffer analysis failed: {}", e))
+}
+
 #[tauri::command]
 fn tauri_analyze_file(path: String) -> Result<PeReport, String> {
     let path_ref = Path::new(&path);
@@ -448,17 +506,31 @@ fn tauri_inject_payload(pid: u32, payload_path: String, method: String) -> Resul
 
 // ── Main ────────────────────────────────────────────────────────────
 
+fn print_help_and_exit() -> ! {
+    use clap::CommandFactory;
+    let _ = Cli::command().print_help();
+    println!();
+    std::process::exit(1);
+}
+
 fn main() -> anyhow::Result<()> {
     let args = Cli::parse();
 
     match args.command {
         None => {
-            // No subcommand = launch GUI
+            // No subcommand = launch GUI. The Vite-built frontend is embedded
+            // into the binary by `tauri::generate_context!()` at compile time,
+            // so as long as the Rust build succeeded, the GUI assets are
+            // present in this EXE — no runtime file check needed.
             tauri::Builder::default()
                 .invoke_handler(tauri::generate_handler![
+                    tauri_pick_file,
+                    tauri_pick_save_file,
                     tauri_analyze_file,
+                    tauri_analyze_buffer_hex,
                     tauri_get_visuals,
                     tauri_protect_binary,
+                    tauri_protect_binary_with_diff,
                     tauri_generate_report,
                     tauri_get_telemetry,
                     tauri_hollow_process,
@@ -477,9 +549,13 @@ fn main() -> anyhow::Result<()> {
         Some(Commands::Gui) => {
             tauri::Builder::default()
                 .invoke_handler(tauri::generate_handler![
+                    tauri_pick_file,
+                    tauri_pick_save_file,
                     tauri_analyze_file,
+                    tauri_analyze_buffer_hex,
                     tauri_get_visuals,
                     tauri_protect_binary,
+                    tauri_protect_binary_with_diff,
                     tauri_generate_report,
                     tauri_get_telemetry,
                     tauri_hollow_process,
@@ -530,7 +606,11 @@ fn main() -> anyhow::Result<()> {
                     section_prefix: ".reap".to_string(), generate_junk_instructions: obfuscate,
                     junk_size: 512, diversify_layout: obfuscate, control_flow_obfuscation: obfuscate,
                     opaque_predicates: obfuscate, bogus_jumps: obfuscate, import_obfuscation: obfuscate,
-                    anti_debug_injection: obfuscate, string_encryption: obfuscate, encrypt_resource_sections: false,
+                    anti_debug_injection: obfuscate, string_encryption: obfuscate,
+                    encrypt_resource_sections: false,
+                    mba_obfuscation: obfuscate, api_hashing: obfuscate,
+                    api_hash_algorithm: reapershield_obfuscation::ApiHashAlgorithm::Djb2Xor,
+                    rc4_strings: false,
                 },
                 hardening: HardeningConfig {
                     force_dep: hardening, force_aslr: hardening, force_high_entropy_aslr: hardening,
@@ -567,6 +647,9 @@ fn main() -> anyhow::Result<()> {
                 diversify_layout: true, control_flow_obfuscation: control_flow, opaque_predicates: control_flow,
                 bogus_jumps: control_flow, import_obfuscation: imports, anti_debug_injection: anti_debug,
                 string_encryption: string_encrypt, encrypt_resource_sections: false,
+                mba_obfuscation: true, api_hashing: true,
+                api_hash_algorithm: reapershield_obfuscation::ApiHashAlgorithm::Djb2Xor,
+                rc4_strings: false,
             };
             let out_buffer = reapershield_obfuscation::ObfuscationEngine::apply_obfuscation(&buffer, &config)?;
             let output_path = file.parent().unwrap_or(Path::new(".")).join(format!(
@@ -590,6 +673,9 @@ fn main() -> anyhow::Result<()> {
                 diversify_layout: true, control_flow_obfuscation: true, opaque_predicates: true,
                 bogus_jumps: true, import_obfuscation: true, anti_debug_injection: true,
                 string_encryption: true, encrypt_resource_sections: true,
+                mba_obfuscation: true, api_hashing: true,
+                api_hash_algorithm: reapershield_obfuscation::ApiHashAlgorithm::Djb2Xor,
+                rc4_strings: true,
             };
             let out_buffer = reapershield_obfuscation::ObfuscationEngine::apply_obfuscation(&buffer, &config)?;
             let output_path = output.unwrap_or_else(|| {
