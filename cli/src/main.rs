@@ -108,6 +108,14 @@ enum Commands {
         /// machine. Implies --sign.
         #[arg(long, default_value_t = false)]
         trust: bool,
+
+        /// Opt in to the original "everything on" aggressive obfuscation
+        /// (control-flow, import, string-encryption). The default is now
+        /// safe - only section-adding passes run, so the output binary
+        /// still executes. Use this flag to restore the pre-fix
+        /// max-suspicion behaviour when you control the target end-to-end.
+        #[arg(long, default_value_t = false)]
+        aggressive: bool,
     },
 
     /// Apply isolated structural code and layout obfuscation to a binary
@@ -128,21 +136,33 @@ enum Commands {
         #[arg(long, default_value_t = 512)]
         junk_size: usize,
 
-        /// Enable control flow obfuscation (opaque predicates, bogus jumps)
-        #[arg(long, default_value_t = true)]
+        /// Enable control flow obfuscation (opaque predicates, bogus jumps).
+        /// DESTRUCTIVE - patches code bytes in-place at random offsets, will
+        /// break most real PE files. Off by default; pair with --aggressive
+        /// to force on.
+        #[arg(long, default_value_t = false)]
         control_flow: bool,
 
-        /// Enable import table obfuscation
-        #[arg(long, default_value_t = true)]
+        /// Enable import table obfuscation. DESTRUCTIVE - rewrites the import
+        /// directory; will break binaries whose IAT the loader needs to find.
+        /// Off by default.
+        #[arg(long, default_value_t = false)]
         imports: bool,
 
         /// Enable anti-debug stub injection
         #[arg(long, default_value_t = true)]
         anti_debug: bool,
 
-        /// Enable string encryption with runtime decrypt
-        #[arg(long, default_value_t = true)]
+        /// Enable string encryption with runtime decrypt. DESTRUCTIVE -
+        /// modifies the code that references strings. Off by default.
+        #[arg(long, default_value_t = false)]
         string_encrypt: bool,
+
+        /// Opt in to the original "everything on" aggressive config. The
+        /// default is now safe (only section-adding passes). Use this flag
+        /// to restore the pre-fix behaviour for max-suspicion output.
+        #[arg(long, default_value_t = false)]
+        aggressive: bool,
     },
 
     /// Apply maximum-strength obfuscation with all techniques enabled
@@ -639,7 +659,7 @@ fn main() -> anyhow::Result<()> {
             }
         }
 
-        Some(Commands::Protect { input, output, passphrase, obfuscate, hardening, compression, sign, trust }) => {
+        Some(Commands::Protect { input, output, passphrase, obfuscate, hardening, compression, sign, trust, aggressive }) => {
             env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
             if !input.exists() {
                 anyhow::bail!("Error: Input file does not exist at path {:?}", input);
@@ -655,16 +675,36 @@ fn main() -> anyhow::Result<()> {
                 _ => CompressionMethod::None,
             };
             let config = ProtectionPipelineConfig {
-                obfuscation: ObfuscationConfig {
-                    encrypt_strings: obfuscate, xor_key: 0x5C, rename_sections: obfuscate,
-                    section_prefix: ".reap".to_string(), generate_junk_instructions: obfuscate,
-                    junk_size: 512, diversify_layout: obfuscate, control_flow_obfuscation: obfuscate,
-                    opaque_predicates: obfuscate, bogus_jumps: obfuscate, import_obfuscation: obfuscate,
-                    anti_debug_injection: obfuscate, string_encryption: obfuscate,
-                    encrypt_resource_sections: false,
-                    mba_obfuscation: obfuscate, api_hashing: obfuscate,
-                    api_hash_algorithm: reapershield_obfuscation::ApiHashAlgorithm::Djb2Xor,
-                    rc4_strings: false,
+                // Build the obfuscation config from a safe base (only
+                // section-adding passes: junk, MBA, anti-debug, API hash).
+                // --obfuscate currently just toggles that base on/off; in
+                // both cases the destructive in-place passes (control-flow,
+                // import, string-encryption) stay off unless --aggressive
+                // is also passed.
+                obfuscation: {
+                    let mut o = if obfuscate {
+                        reapershield_obfuscation::ObfuscationConfig::safe()
+                    } else {
+                        reapershield_obfuscation::ObfuscationConfig {
+                            generate_junk_instructions: false,
+                            diversify_layout: false,
+                            rename_sections: false,
+                            anti_debug_injection: false,
+                            ..reapershield_obfuscation::ObfuscationConfig::safe()
+                        }
+                    };
+                    if aggressive {
+                        o.control_flow_obfuscation = true;
+                        o.opaque_predicates = true;
+                        o.bogus_jumps = true;
+                        o.import_obfuscation = true;
+                        o.string_encryption = true;
+                        o.encrypt_strings = true;
+                        o.mba_obfuscation = true;
+                        o.api_hashing = true;
+                        o.rc4_strings = true;
+                    }
+                    o
                 },
                 hardening: HardeningConfig {
                     force_dep: hardening, force_aslr: hardening, force_high_entropy_aslr: hardening,
@@ -699,23 +739,34 @@ fn main() -> anyhow::Result<()> {
             println!("==================================================");
         }
 
-        Some(Commands::Obfuscate { file, prefix, junk, junk_size, control_flow, imports, anti_debug, string_encrypt }) => {
+        Some(Commands::Obfuscate { file, prefix, junk, junk_size, control_flow, imports, anti_debug, string_encrypt, aggressive }) => {
             env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
             if !file.exists() {
                 anyhow::bail!("Error: Target file does not exist at path {:?}", file);
             }
             println!("[*] Applying binary obfuscation filters to: {:?}", file);
             let buffer = std::fs::read(&file)?;
-            let config = ObfuscationConfig {
-                encrypt_strings: string_encrypt, xor_key: 0x5C, rename_sections: !prefix.is_empty(),
-                section_prefix: prefix, generate_junk_instructions: junk, junk_size,
-                diversify_layout: true, control_flow_obfuscation: control_flow, opaque_predicates: control_flow,
-                bogus_jumps: control_flow, import_obfuscation: imports, anti_debug_injection: anti_debug,
-                string_encryption: string_encrypt, encrypt_resource_sections: false,
-                mba_obfuscation: true, api_hashing: true,
-                api_hash_algorithm: reapershield_obfuscation::ApiHashAlgorithm::Djb2Xor,
-                rc4_strings: false,
+            let mut config = if aggressive {
+                reapershield_obfuscation::ObfuscationConfig::aggressive()
+            } else {
+                reapershield_obfuscation::ObfuscationConfig::safe()
             };
+            // CLI flags can opt-in to specific passes on top of the base
+            // config (safe or aggressive). When --aggressive is set the
+            // individual flags are ignored - aggressive already enables all.
+            if !aggressive {
+                config.control_flow_obfuscation = control_flow;
+                config.opaque_predicates = control_flow;
+                config.bogus_jumps = control_flow;
+                config.import_obfuscation = imports;
+                config.string_encryption = string_encrypt;
+                config.encrypt_strings = string_encrypt;
+            }
+            config.rename_sections = !prefix.is_empty();
+            config.section_prefix = prefix;
+            config.generate_junk_instructions = junk;
+            config.junk_size = junk_size;
+            config.anti_debug_injection = anti_debug;
             let out_buffer = reapershield_obfuscation::ObfuscationEngine::apply_obfuscation(&buffer, &config)?;
             let output_path = file.parent().unwrap_or(Path::new(".")).join(format!(
                 "{}_obfuscated.exe", file.file_stem().unwrap_or_default().to_string_lossy()

@@ -84,6 +84,28 @@ With subcommands → CLI mode:
 .\target\release\reapershield.exe gui
 ```
 
+### Default obfuscation profile is **safe**
+
+The `protect` and `obfuscate` subcommands default to the **safe** obfuscation
+profile (`ObfuscationConfig::safe()`). It only APPENDS new sections
+(`.reacode`, `.reajunk`, `.reasec`, `.reapint`, `.reapack`) and never patches
+existing code bytes — the output binary is guaranteed to still execute.
+
+For max-suspicion output (and the pre-fix "everything on" behaviour —
+opaque predicates, bogus jumps, import obfuscation, string encryption
+written into random offsets of `.text`) opt in with `--aggressive`. **Be
+aware**: `--aggressive` patches real x86 code in-place and will corrupt
+most real PE files at load time. Use it only on binaries you control
+end-to-end and have integration tests for.
+
+```powershell
+# Default (safe, won't break the binary)
+.\reapershield.exe protect in.exe --output out.exe --sign
+
+# Aggressive (max-suspicion, DESTRUCTIVE — will likely break the target)
+.\reapershield.exe protect in.exe --output out.exe --aggressive
+```
+
 ### Rebuild loop (after editing React code)
 
 ```powershell

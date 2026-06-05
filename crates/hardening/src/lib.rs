@@ -117,9 +117,13 @@ impl HardeningSystem {
         let e_lfanew = u32::from_le_bytes(pe_buffer[0x3C..0x40].try_into().unwrap()) as usize;
         let coff_offset = e_lfanew + 4;
         
-        // Optional Header field offsets (from coff_offset + 20)
-        // DllCharacteristics is at offset 70 (PE32) and 70 (PE32+)
-        let dll_characteristics_offset = coff_offset + 20 + 70;
+        // Optional Header field offsets (from coff_offset + 24, i.e. past
+        // the 4-byte PE\0\0 signature and 20-byte COFF header). DllCharacteristics
+        // is at offset 70 of the Optional Header for BOTH PE32 and PE32+.
+        // (Previous version used `coff_offset + 20 + 70`, which is 4 bytes
+        // too early and clobbered SizeOfStackReserve/Commit, breaking the
+        // binary at load time.)
+        let dll_characteristics_offset = coff_offset + 24 + 70;
 
         if out_buffer.len() < dll_characteristics_offset + 2 {
             return Err(HardeningError::InvalidPe);

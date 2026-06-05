@@ -74,7 +74,56 @@ pub struct ObfuscationConfig {
 }
 
 impl Default for ObfuscationConfig {
+    /// **Safe defaults** - only techniques that APPEND new sections or rename
+    /// existing ones. The destructive in-place passes
+    /// (`control_flow_obfuscation`, `opaque_predicates`, `bogus_jumps`,
+    /// `import_obfuscation`, `string_encryption`) are OFF because they patch
+    /// existing code bytes at random offsets and will corrupt / hang any
+    /// hand-packed or small binary. Use [`Self::aggressive`] to opt back in
+    /// to the original "everything on" behaviour.
     fn default() -> Self {
+        Self::safe()
+    }
+}
+
+impl ObfuscationConfig {
+    /// Conservative, "won't break the binary" config. Only uses techniques
+    /// that APPEND new sections (.reacode, .reajunk, .reasec, .reapint,
+    /// .reapack) without touching the original `.text` / `.rdata` / `.data`
+    /// / `.pdata` / `.rsrc` / `.tls` layout. Renaming those breaks the
+    /// exception dispatch tables, unwind info, debug directory and TLS
+    /// callbacks. Suitable for any PE where you need the output to still
+    /// execute.
+    pub fn safe() -> Self {
+        Self {
+            encrypt_strings: false,
+            xor_key: 0x5C,
+            rename_sections: false,
+            section_prefix: ".reap".to_string(),
+            generate_junk_instructions: true,
+            junk_size: 1024,
+            diversify_layout: true,
+            control_flow_obfuscation: false,
+            opaque_predicates: false,
+            bogus_jumps: false,
+            import_obfuscation: false,
+            anti_debug_injection: true,
+            string_encryption: false,
+            encrypt_resource_sections: false,
+            mba_obfuscation: false,
+            api_hashing: false,
+            api_hash_algorithm: ApiHashAlgorithm::Djb2Xor,
+            rc4_strings: false,
+        }
+    }
+
+    /// Aggressive "everything on" config - matches the original behaviour
+    /// before the safe-defaults refactor. Produces high-suspicion binaries
+    /// but WILL break many real PE files because opaque predicates and
+    /// bogus jumps are written into random offsets inside the existing
+    /// `.text` section. Only use on binaries you control end-to-end and
+    /// have integration tests for.
+    pub fn aggressive() -> Self {
         Self {
             encrypt_strings: true,
             xor_key: 0x5C,
